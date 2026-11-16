@@ -35,7 +35,9 @@ for name in ["wK", "wQ", "wR", "wB", "wN", "wP", "bK", "bQ", "bR", "bB", "bN", "
 
 sf = base64.b64encode((vendor / "stockfish.js").read_bytes()).decode()
 
+teach = (here / "teach.src.js").read_text(encoding="utf-8")
 out = (src.replace("/*CHESSJS*/", chessjs)
+          .replace("/*TEACH*/", teach)
           .replace("/*PIECES*/{}", json.dumps(pieces))
           .replace("/*OPENINGS*/{}", json.dumps(openings, ensure_ascii=True))
           .replace("/*SFB64*/", sf))

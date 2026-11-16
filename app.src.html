@@ -64,7 +64,7 @@ label.sm{font-size:13px;color:var(--dim);display:block;margin-top:10px}
 </head>
 <body>
 <div id="app">
-  <div id="top"><div id="opening">Chess Coach</div><div id="status"></div></div>
+  <div id="top"><div id="opening">Chess Coach ›</div><div id="status"></div></div>
   <div id="evalbar"><div id="evalfill"></div></div>
   <div id="boardwrap"><div id="board"></div></div>
   <div id="bar">
@@ -101,7 +101,7 @@ var LABEL = {best:"Best",good:"Good",inacc:"Inaccuracy",mist:"Mistake",blun:"Blu
 
 var $ = function(id){return document.getElementById(id);};
 var S = {game:null, me:"w", level:2, recs:[], gen:0, sel:null, pre:null, busy:false, over:false,
-         review:null, lastOpening:"", hint:null, wantPre:null};
+         review:null, lastOpening:"", hint:null, wantPre:null, hintStep:0, lastFamily:"", leftBook:false};
 
 /* ---------- engine ---------- */
 var Eng = {w:null, q:[], cur:null, ready:false};
@@ -173,11 +173,13 @@ function uciToMove(u){ return {from:u.slice(0,2), to:u.slice(2,4), promotion:u.l
 function sanOf(fen, uci){
   try{ var g = new Chess(fen); var m = g.move(uciToMove(uci)); return m?m.san:null; }catch(e){ return null; }
 }
-function playLine(fen, pv, maxPlies){   // returns {sans:[], endFen}
+function playLine(fen, pv, maxPlies, trim){   // returns {sans:[], endFen}
   var g = new Chess(fen), out = [];
   for(var i=0;i<pv.length && i<maxPlies;i++){
     var m = g.move(uciToMove(pv[i])); if(!m) break; out.push(m.san);
   }
+  // do not count a capture by the line's first mover that ends the line: the recapture is not shown
+  if(trim) while(out.length>1 && out[out.length-1].indexOf("x")>=0 && (out.length-1)%2===0){ g.undo(); out.pop(); }
   return {sans:out, endFen:g.fen()};
 }
 function lineText(fen, sans){
@@ -274,8 +276,10 @@ function checkOpening(){
   var name = OPENINGS[h.join(" ")];
   if(name && name!==S.lastOpening){
     S.lastOpening = name;
-    $("opening").textContent = name;
-    say("coach","This is the <b>"+esc(name)+"</b>.","Opening");
+    $("opening").textContent = name+" ›";
+    var fam = family(name), extra = "";
+    if(fam!==S.lastFamily){ S.lastFamily = fam; var idea = ideaFor(name); if(idea) extra = " "+esc(idea); }
+    say("coach","This is the <b>"+esc(name)+"</b>."+extra,"Opening");
   }
 }
 
@@ -283,17 +287,18 @@ function checkOpening(){
 function newGame(color, level){
   engReset();
   S.game = new Chess(); S.me = color; S.level = level; S.recs = []; S.sel = null; S.pre = null;
-  S.busy = false; S.over = false; S.review = null; S.lastOpening = ""; S.hint = null; S.wantPre = null;
-  $("coach").innerHTML = ""; $("opening").textContent = "Chess Coach";
+  S.busy = false; S.over = false; S.review = null; S.lastOpening = ""; S.hint = null; S.wantPre = null; S.hintStep = 0; S.lastFamily = ""; S.leftBook = false;
+  $("coach").innerHTML = ""; $("opening").textContent = "Chess Coach ›";
   say("coach","You are "+(color==="w"?"White":"Black")+" against level "+LEVELS[level].name+" ("+LEVELS[level].blurb+"). Tap a piece, then tap where it goes. I rate every move you make.");
   drawBoard(); save();
   turnStart();
 }
 function turnStart(){
-  S.hint = null; S.wantHint = false;
+  S.hint = null; S.wantHint = false; S.hintStep = 0;
   if(S.game.game_over()){ finish(); return; }
   if(S.game.turn()===S.me){
     S.busy = false; setStatus("Your move"); refreshButtons();
+    bookTip();
     var fen = S.game.fen(), gen = S.gen;
     S.pre = null;
     engAsk(fen, 20, ANALYSIS.depth, ANALYSIS.ms, function(best, info){
@@ -368,7 +373,10 @@ function judge(rec, pre, post){
   var after = post ? 100 - winPct(post.info) : before;
   var drop = Math.max(0, before - after);
   var isBest = pre && pre.best === rec.uci;
-  var kind = isBest || drop<2 ? "best" : drop<8 ? "good" : drop<16 ? "inacc" : drop<28 ? "mist" : "blun";
+  var kind = isBest || drop<2 ? "best" : drop<10 ? "good" : drop<18 ? "inacc" : drop<30 ? "mist" : "blun";
+  // a move the opening book knows is never marked down for a small engine preference
+  var inBook = !!bookNodeFor(S.game.history());
+  if(inBook && (kind==="inacc" || kind==="good")) kind = isBest ? "best" : "good";
   // a missed forced mate is never better than a mistake
   var hadMate = pre && pre.info && pre.info.type==="mate" && pre.info.val>0;
   var keptMate = post && post.info && post.info.type==="mate" && post.info.val<0;
@@ -378,15 +386,17 @@ function judge(rec, pre, post){
   rec.bestSan = pre && pre.best ? sanOf(rec.fenBefore, pre.best) : null;
 
   var why = "";
+  var mine = explain(rec.fenBefore, rec.uci).map(function(r){return r.x;}).slice(0,2).join(" ");
+  var bestWhy = (pre && pre.best && !isBest) ? explain(rec.fenBefore, pre.best).map(function(r){return r.x;}).slice(0,2).join(" ") : "";
   if(kind==="best"){
-    why = isBest ? "The engine's first choice." : "As good as the engine's choice.";
+    why = mine;
   } else if(kind==="good"){
-    why = "A sound move." + (rec.bestSan ? " The engine slightly prefers <b>"+esc(rec.bestSan)+"</b>." : "");
+    why = (inBook ? "A known book move. " : "") + mine + (rec.bestSan ? " The engine slightly prefers <b>"+esc(rec.bestSan)+"</b>. "+bestWhy : "");
   } else {
     var parts = [];
     // what the opponent can now do
     if(post && post.info){
-      var line = playLine(rec.fenAfter, post.info.pv||[post.best], 5);
+      var line = playLine(rec.fenAfter, post.info.pv||[post.best], 5, true);
       if(post.info.type==="mate" && post.info.val>0){
         parts.push("It allows checkmate in "+post.info.val+", starting with <b>"+esc(line.sans[0]||"")+"</b>.");
       } else {
@@ -397,21 +407,26 @@ function judge(rec, pre, post){
         }
       }
     }
+    // the rule it broke
+    var lostAlready = parts.length>0;
+    principles(rec.fenBefore, rec.uci).forEach(function(w){ if(!(lostAlready && w.indexOf("It leaves your")===0)) parts.push(w); });
+    if(!parts.length && post && post.info && (post.info.pv||[]).length){
+      var pl = playLine(rec.fenAfter, post.info.pv, 3);
+      parts.push("No piece is lost at once, but it hands over the initiative: the engine answers <b>"+esc(lineText(rec.fenAfter, pl.sans))+"</b> and stands "+(kind==="inacc"?"a little":"clearly")+" better.");
+    }
     // what was there instead
     if(pre && pre.info && rec.bestSan){
-      var bl = playLine(rec.fenBefore, pre.info.pv||[pre.best], 5);
+      var bl = playLine(rec.fenBefore, pre.info.pv||[pre.best], 5, true);
       if(hadMate){
         parts.push("You had checkmate in "+pre.info.val+" with <b>"+esc(rec.bestSan)+"</b>.");
       } else {
         var gain = material(bl.endFen, me) - material(rec.fenBefore, me);
-        if(gain>=1 && !parts.length){
+        if(gain>=1){
           var tw = tradeText(rec.fenBefore, bl.endFen, me);
           parts.push("You missed <b>"+esc(lineText(rec.fenBefore, bl.sans))+"</b>, which wins "+(tw.theirs||"material")+(tw.mine?" for "+tw.mine:"")+".");
-        }
-        else parts.push("Better was <b>"+esc(rec.bestSan)+"</b>.");
+        } else parts.push("Better was <b>"+esc(rec.bestSan)+"</b>. "+bestWhy);
       }
     }
-    if(parts.length && parts[0].indexOf("Better was")===0) parts.unshift("It weakens your position: no piece is lost at once, but the engine's line leaves you clearly worse.");
     why = parts.join(" ");
   }
   rec.why = why;
@@ -508,8 +523,20 @@ $("bUndo").onclick = function(){
 };
 $("bHint").onclick = function(){
   if(!S.pre || S.pre.fen!==S.game.fen()){ S.wantHint = true; setStatus("Finding a hint…"); return; }
-  var b = S.pre.best; S.hint = [b.slice(0,2), b.slice(2,4)]; S.sel = null; drawBoard();
-  say("coach","The engine would play <b>"+esc(sanOf(S.pre.fen,b)||b)+"</b> (green squares).","Hint");
+  var b = S.pre.best, why = explain(S.pre.fen, b);
+  if(S.hintStep===0){
+    S.hintStep = 1;
+    say("coach", esc(CLUE[why[0].t]||CLUE.quiet)+' <span class="dimtxt">Tap Hint again for the move.</span>',"Hint");
+    return;
+  }
+  S.hintStep = 0;
+  S.hint = [b.slice(0,2), b.slice(2,4)]; S.sel = null; drawBoard();
+  var plan = "";
+  if(S.pre.info && (S.pre.info.pv||[]).length>1){
+    var pl = playLine(S.pre.fen, S.pre.info.pv, 3);
+    if(pl.sans.length>1) plan = ' <span class="dimtxt">The engine expects '+esc(lineText(S.pre.fen, pl.sans))+".</span>";
+  }
+  say("coach","<b>"+esc(sanOf(S.pre.fen,b)||b)+"</b> (green squares). "+why.map(function(r){return esc(r.x);}).join(" ")+plan,"Hint");
 };
 $("bResign").onclick = function(){ if(!S.over && confirm("Resign this game?")){ engReset(); finish(true); } };
 
@@ -523,11 +550,47 @@ function load(){
     if(!d || !d.recs || !d.recs.length || d.over) return false;
     S.game = new Chess(); S.me = d.me; S.level = d.level; S.recs = [];
     for(var i=0;i<d.recs.length;i++){ if(!S.game.move(d.recs[i].san)) break; S.recs.push(d.recs[i]); }
-    S.lastOpening = d.op||""; if(S.lastOpening) $("opening").textContent = S.lastOpening;
+    S.lastOpening = d.op||""; if(S.lastOpening){ $("opening").textContent = S.lastOpening+" ›"; S.lastFamily = family(S.lastOpening); }
     say("coach","Picking up your game where you left it.");
     drawBoard(); turnStart(); return true;
   }catch(e){ return false; }
 }
+
+/*TEACH*/
+
+/* ---------- opening book in the coach ---------- */
+function bookTip(){
+  var hist = S.game.history();
+  if(hist.length>24 || S.leftBook) return;
+  var node = bookNodeFor(hist);
+  if(!node){
+    S.leftBook = true;
+    if(hist.length) say("coach","You are out of the opening book now. From here the plan is the same in every opening: get your knights and bishops out, castle, and fight for the centre.","Book");
+    return;
+  }
+  var opts = bookMoves(node, 4);
+  if(!opts.length) return;
+  var txt = opts.map(function(o){ return "<b>"+esc(o.san)+"</b> "+esc(shortName(o.name)); }).join(" · ");
+  var ml = mainLine(node, 3);
+  say("coach","Known moves here: "+txt+"."+(ml.length>1?' <span class="dimtxt">Main line: '+esc(lineText(S.game.fen(), ml))+".</span>":""),"Book");
+}
+function shortName(n){ return n.length>44 ? n.slice(0,42)+"…" : n; }
+function showOpening(){
+  var hist = S.game.history(), node = bookNodeFor(hist), name = S.lastOpening||"Starting position";
+  var h = "<h2>"+esc(name)+"</h2>";
+  var idea = S.lastOpening ? ideaFor(S.lastOpening) : "The four central squares decide the opening. 1. e4 and 1. d4 are the two main first moves.";
+  if(idea) h += "<p style='color:var(--ink)'>"+esc(idea)+"</p>";
+  if(node && Object.keys(node.c).length){
+    h += "<p>"+(S.game.turn()===S.me?"Your known moves":"Known replies")+" from this position, most analysed first:</p>";
+    bookMoves(node, 10).forEach(function(o){
+      var sub = mainLine(node.c[o.san], 3);
+      h += '<div class="worst"><b>'+esc(o.san)+"</b> · "+esc(o.name)+(sub.length?'<br><span class="dimtxt">then '+esc(sub.join(" "))+"</span>":"")+"</div>";
+    });
+  } else h += "<p>This position is outside the opening book. Play by principle: develop, castle, centre.</p>";
+  h += '<button class="go" id="sClose2">Back to the game</button>';
+  openSheet(h); $("sClose2").onclick = closeSheet;
+}
+$("opening").onclick = showOpening;
 
 /* ---------- start ---------- */
 S.game = new Chess(); drawBoard(); refreshButtons();
